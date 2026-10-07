@@ -2,14 +2,14 @@ package auth
 
 import (
 	"context"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"net/http"
 	"reflect"
 	"strconv"
 	"testing"
 	"time"
 
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
