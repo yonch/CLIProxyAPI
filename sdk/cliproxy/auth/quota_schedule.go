@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -102,6 +104,89 @@ func quotaScheduleFromHeaders(provider string, headers http.Header, observedAt t
 		}
 	}
 	return schedule
+}
+
+func quotaUsageAlias(record map[string]json.RawMessage, names ...string) json.RawMessage {
+	var selected json.RawMessage
+	for _, name := range names {
+		if value, ok := record[name]; ok {
+			if selected != nil && !bytes.Equal(bytes.TrimSpace(selected), bytes.TrimSpace(value)) {
+				return json.RawMessage(`!`)
+			}
+			selected = value
+		}
+	}
+	return selected
+}
+
+// QuotaResetScheduleFromUsage normalizes a Claude /api/oauth/usage or Codex
+// /backend-api/wham/usage response body. It reports false when the body is
+// malformed, ambiguous or carries no reset window, so callers keep the prior observation.
+func QuotaResetScheduleFromUsage(provider string, body []byte, observedAt time.Time) (QuotaResetSchedule, bool) {
+	schedule := QuotaResetSchedule{ObservedAt: observedAt}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil || payload == nil {
+		return schedule, false
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		for _, key := range []string{"seven_day", "five_hour"} {
+			var window struct {
+				ResetAt     string   `json:"resets_at"`
+				Utilization *float64 `json:"utilization"`
+			}
+			if json.Unmarshal(payload[key], &window) != nil || window.Utilization == nil || *window.Utilization < 0 {
+				return schedule, false
+			}
+			if window.ResetAt == "" {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, window.ResetAt)
+			if err != nil {
+				return schedule, false
+			}
+			if key == "seven_day" {
+				schedule.WeeklyResetAt = at
+			} else {
+				schedule.FiveHourResetAt = at
+			}
+		}
+	case "codex":
+		var limit map[string]json.RawMessage
+		if json.Unmarshal(quotaUsageAlias(payload, "rate_limit", "rateLimit"), &limit) != nil || limit == nil {
+			return schedule, false
+		}
+		for _, names := range [][]string{{"primary_window", "primaryWindow"}, {"secondary_window", "secondaryWindow"}} {
+			raw := quotaUsageAlias(limit, names...)
+			if string(bytes.TrimSpace(raw)) == "null" {
+				continue
+			}
+			var window map[string]json.RawMessage
+			if json.Unmarshal(raw, &window) != nil || window == nil {
+				return schedule, false
+			}
+			var seconds, resetAt int64
+			if json.Unmarshal(quotaUsageAlias(window, "limit_window_seconds", "limitWindowSeconds"), &seconds) != nil ||
+				json.Unmarshal(quotaUsageAlias(window, "reset_at", "resetAt"), &resetAt) != nil || resetAt <= 0 || resetAt > 253402300799 {
+				return schedule, false
+			}
+			at := time.Unix(resetAt, 0).UTC()
+			if seconds == 604800 {
+				if !schedule.WeeklyResetAt.IsZero() {
+					return schedule, false
+				}
+				schedule.WeeklyResetAt = at
+			} else if seconds == 18000 {
+				if !schedule.FiveHourResetAt.IsZero() {
+					return schedule, false
+				}
+				schedule.FiveHourResetAt = at
+			}
+		}
+	default:
+		return schedule, false
+	}
+	return schedule, !schedule.WeeklyResetAt.IsZero() || !schedule.FiveHourResetAt.IsZero()
 }
 
 // RecordQuotaResetScheduleIfUnchanged publishes usage reset times only while

@@ -247,7 +247,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	if routingSnapshot != nil && !routingRedirected && resp.StatusCode == http.StatusOK {
-		if schedule, ok := routingUsageSchedule(routingSnapshot.Provider, respBody, time.Now()); ok {
+		if schedule, ok := coreauth.QuotaResetScheduleFromUsage(routingSnapshot.Provider, respBody, time.Now()); ok {
 			h.authManager.RecordQuotaResetScheduleIfUnchanged(c.Request.Context(), routingSnapshot, schedule)
 		}
 	}

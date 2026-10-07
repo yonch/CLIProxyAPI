@@ -37,7 +37,7 @@ func TestRoutingUsageScheduleNormalization(t *testing.T) {
 		{name: "malformed", provider: "claude", body: `{"seven_day":`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, ok := routingUsageSchedule(tc.provider, []byte(tc.body), now)
+			s, ok := coreauth.QuotaResetScheduleFromUsage(tc.provider, []byte(tc.body), now)
 			if ok != tc.valid {
 				t.Fatalf("valid=%v want %v", ok, tc.valid)
 			}
