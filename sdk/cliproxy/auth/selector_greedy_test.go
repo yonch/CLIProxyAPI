@@ -218,3 +218,76 @@ func TestGreedyResultUpdatesExistingModelShards(t *testing.T) {
 		})
 	}
 }
+
+func TestGreedyUnobservedRanksFirst(t *testing.T) {
+	now := time.Now()
+	known := QuotaResetSchedule{WeeklyResetAt: now.Add(time.Hour), ObservedAt: now}
+	for _, tc := range []struct {
+		name, provider string
+		quota          QuotaState
+		want           string
+	}{
+		{"unobserved claude", "claude", QuotaState{}, "z"},
+		{"unobserved codex", "codex", QuotaState{}, "z"},
+		{"headers without reset", "claude", QuotaState{ObservedAt: now}, "a"},
+		{"unobservable provider", "gemini", QuotaState{}, "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &Auth{ID: "a", Provider: tc.provider, QuotaResetSchedule: known}
+			z := &Auth{ID: "z", Provider: tc.provider, Quota: tc.quota}
+			for _, candidates := range [][]*Auth{{a, z}, {z, a}} {
+				got, err := (&GreedySelector{}).Pick(context.Background(), tc.provider, "", cliproxyexecutor.Options{}, candidates)
+				if err != nil || got.ID != tc.want {
+					t.Fatalf("got %v err %v want %s", got, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestGreedyFirstObservationUpdatesExistingModelShards(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for name, header := range map[string][2]string{
+		// A later reset and a response without reset times both rank the credential behind the known one.
+		"later_reset":   {"Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(5*24*time.Hour).Unix(), 10)},
+		"without_reset": {"Anthropic-Ratelimit-Unified-Status", "allowed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := NewManager(nil, &GreedySelector{}, nil)
+			reg := registry.GetGlobalRegistry()
+			known := &Auth{ID: "greedy-first-observation-known-" + name, Provider: "claude", Status: StatusActive, QuotaResetSchedule: QuotaResetSchedule{WeeklyResetAt: now.Add(2 * time.Hour), ObservedAt: now.Add(-time.Hour)}}
+			fresh := &Auth{ID: "greedy-first-observation-fresh-" + name, Provider: "claude", Status: StatusActive}
+			for _, auth := range []*Auth{known, fresh} {
+				reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "model-a"}, {ID: "model-b"}})
+				id := auth.ID
+				t.Cleanup(func() { reg.UnregisterClient(id) })
+				if _, err := m.Register(WithSkipPersist(context.Background()), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pick := func(model string) string {
+				t.Helper()
+				got, err := m.scheduler.pickSingle(context.Background(), "claude", model, cliproxyexecutor.Options{}, nil)
+				if err != nil || got == nil {
+					t.Fatalf("pick %s: %v %v", model, got, err)
+				}
+				return got.ID
+			}
+			for _, model := range []string{"model-a", "model-b"} {
+				if got := pick(model); got != fresh.ID {
+					t.Fatalf("unobserved credential not probed for %s: %s", model, got)
+				}
+			}
+			ctx := internallogging.WithResponseHeadersHolder(WithSkipPersist(context.Background()))
+			h := http.Header{}
+			h.Set(header[0], header[1])
+			internallogging.SetResponseHeaders(ctx, h)
+			m.MarkResult(ctx, Result{AuthID: fresh.ID, Provider: "claude", Model: "model-a", Success: true})
+			for _, model := range []string{"model-a", "model-b"} {
+				if got := pick(model); got != known.ID {
+					t.Fatalf("first observation not ranked for %s: %s", model, got)
+				}
+			}
+		})
+	}
+}

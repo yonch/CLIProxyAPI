@@ -997,7 +997,8 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 		previous := EffectiveQuotaResetSchedule(existingMeta.auth)
 		current := EffectiveQuotaResetSchedule(auth)
 		greedyResetChanged = !previous.WeeklyResetAt.Equal(current.WeeklyResetAt) ||
-			!previous.FiveHourResetAt.Equal(current.FiveHourResetAt)
+			!previous.FiveHourResetAt.Equal(current.FiveHourResetAt) ||
+			greedyUnobserved(existingMeta.auth) != greedyUnobserved(auth)
 	}
 
 	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || greedyResetChanged || len(targetModels) == 0 {
