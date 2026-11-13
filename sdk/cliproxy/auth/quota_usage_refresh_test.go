@@ -313,7 +313,7 @@ func TestRefreshQuotaResetScheduleFeedsGreedyRanking(t *testing.T) {
 	soon, later := now.Add(24*time.Hour), now.Add(72*time.Hour)
 	a := quotaUsageTestAuth("greedy-refresh-a", "claude")
 	b := quotaUsageTestAuth("greedy-refresh-b", "claude")
-	b.QuotaResetSchedule = QuotaResetSchedule{WeeklyResetAt: later, ObservedAt: now.Add(-time.Minute)}
+	b.QuotaResetSchedule = QuotaResetSchedule{WeeklyResetAt: soon, ObservedAt: now.Add(-time.Minute)}
 	reg := registry.GetGlobalRegistry()
 	for _, auth := range []*Auth{a, b} {
 		id := auth.ID
@@ -325,7 +325,7 @@ func TestRefreshQuotaResetScheduleFeedsGreedyRanking(t *testing.T) {
 		if auth.ID != a.ID {
 			return nil, errors.New("unexpected read")
 		}
-		return quotaUsageClaudeBody(soon, now.Add(time.Hour)), nil
+		return quotaUsageClaudeBody(later, now.Add(time.Hour)), nil
 	}})
 	for _, auth := range []*Auth{a, b} {
 		if _, err := m.Register(WithSkipPersist(context.Background()), auth); err != nil {
@@ -340,19 +340,39 @@ func TestRefreshQuotaResetScheduleFeedsGreedyRanking(t *testing.T) {
 		}
 		return got.ID
 	}
-	if got := pick(); got != b.ID {
-		t.Fatalf("before refresh picked %s, want the only known reset %s", got, b.ID)
+	if got := pick(); got != a.ID {
+		t.Fatalf("before refresh picked %s, want unobserved %s probed", got, a.ID)
 	}
 	before := mustGetAuth(t, m, a.ID)
 	if err := m.RefreshQuotaResetSchedule(context.Background(), a.ID, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if got := pick(); got != a.ID {
-		t.Fatalf("after refresh picked %s, want soonest reset %s", got, a.ID)
+	if got := pick(); got != b.ID {
+		t.Fatalf("after refresh picked %s, want soonest reset %s", got, b.ID)
 	}
 	after := mustGetAuth(t, m, a.ID)
 	if !reflect.DeepEqual(before.Quota, after.Quota) || before.Unavailable != after.Unavailable || before.Status != after.Status ||
 		!reflect.DeepEqual(before.Metadata, after.Metadata) {
 		t.Fatal("usage refresh changed availability, quota state or credential metadata")
+	}
+}
+
+func TestRefreshQuotaResetScheduleWithoutFiveHourWindow(t *testing.T) {
+	weekly := time.Now().Add(48 * time.Hour).Truncate(time.Second)
+	resets := fmt.Sprintf(`"seven_day":{"utilization":31,"resets_at":%q}`, weekly.UTC().Format(time.RFC3339))
+	for name, body := range map[string]string{
+		"absent": "{" + resets + "}",
+		"null":   "{" + resets + `,"five_hour":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newQuotaUsageTestManager(t, func(context.Context, *Auth) ([]byte, error) { return []byte(body), nil }, quotaUsageTestAuth("claude-a", "claude"))
+			if err := m.RefreshQuotaResetSchedule(context.Background(), "claude-a", time.Second); err != nil {
+				t.Fatal(err)
+			}
+			got := mustGetAuth(t, m, "claude-a").QuotaResetSchedule
+			if !got.WeeklyResetAt.Equal(weekly) || !got.FiveHourResetAt.IsZero() {
+				t.Fatalf("schedule = %+v, want weekly only", got)
+			}
+		})
 	}
 }

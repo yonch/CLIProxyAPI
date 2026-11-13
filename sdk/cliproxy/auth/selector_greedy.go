@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -28,6 +29,9 @@ func (s *GreedySelector) Pick(ctx context.Context, provider, model string, opts 
 }
 
 func greedyAuthLess(a, b *Auth, now time.Time) bool {
+	if au, bu := greedyUnobserved(a), greedyUnobserved(b); au != bu {
+		return au
+	}
 	as, bs := EffectiveQuotaResetSchedule(a), EffectiveQuotaResetSchedule(b)
 	for _, pair := range [][2]time.Time{{as.WeeklyResetAt, bs.WeeklyResetAt}, {as.FiveHourResetAt, bs.FiveHourResetAt}} {
 		af, bf := pair[0].After(now), pair[1].After(now)
@@ -39,6 +43,17 @@ func greedyAuthLess(a, b *Auth, now time.Time) bool {
 		}
 	}
 	return a.ID < b.ID
+}
+
+// greedyUnobserved reports a credential whose reset schedule could be observed but
+// has not been yet. It ranks first so one request returns its reset headers;
+// otherwise an idle credential whose usage reads fail would never be ranked.
+func greedyUnobserved(a *Auth) bool {
+	switch strings.ToLower(strings.TrimSpace(a.Provider)) {
+	case "claude", "codex":
+		return a.QuotaResetSchedule.ObservedAt.IsZero() && a.Quota.ObservedAt.IsZero()
+	}
+	return false
 }
 
 func (v *readyView) pickGreedy(predicate func(*scheduledAuth) bool) *scheduledAuth {
